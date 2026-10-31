@@ -86,8 +86,10 @@ While the mirror is running, the selection is locked; stop it first to change it
 ## Project layout
 
 ```
-Cargo.toml     Package manifest and the `windows` crate features
-src/main.rs    Capture engine, window procedures and GUI
+Cargo.toml         Package manifest and the `windows` crate features
+build.rs           Embeds the application icon and version info into the .exe
+assets/icon.ico    Application icon used by build.rs
+src/main.rs        Capture engine, window procedures and GUI
 ```
 
 ## Contributing

@@ -784,11 +784,16 @@ fn main() -> Result<()> {
 
         let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
 
+        // Icono incrustado por build.rs (recurso con ID 1)
+        let icon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
+
         // Clase de la ventana de control
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(ctl_proc),
             hInstance: hinst,
+            hIcon: icon,
+            hIconSm: icon,
             lpszClassName: w!("ScreenMirrorCtl"),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut c_void),
