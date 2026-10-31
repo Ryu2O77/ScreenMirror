@@ -43,8 +43,8 @@ dependencies.
 ## Build and run
 
 ```powershell
-git clone https://github.com/<your-user>/screen-mirror.git
-cd screen-mirror
+git clone https://github.com/Ryu2O77/ScreenMirror.git
+cd ScreenMirror
 cargo run --release
 ```
 
