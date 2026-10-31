@@ -16,7 +16,8 @@ on the monitor of your choice (a TV, a second screen, a capture device, etc.).
 - Visual layout panel that draws your monitors in their real arrangement:
   left click a monitor to pick the one to mirror
 - The **Open monitor** dialog asks where to show the copy and whether it should
-  start fullscreen, remembering both choices for the next time
+  start fullscreen, remembering both choices for the next time. The source
+  monitor itself can be picked too, which shows a windowed copy of that screen
 - Optional VSync
 - The mirror opens as a floating window on the chosen monitor; press
   **F11** to make it fullscreen and **Esc** to go back
@@ -63,8 +64,9 @@ The optimized executable ends up in `target\release\screen-mirror.exe`.
    **left click** on the panel (it turns blue and is tagged `[SOURCE]`).
 3. Optionally tick **VSync** to avoid tearing at the cost of a little latency.
 4. Press **Open monitor...**. A small dialog asks **Show on** (which monitor
-   displays the copy) and **Open fullscreen**. The `[MIRROR]` tag in the panel
-   follows the window, even while you drag it to another monitor.
+   displays the copy; the source monitor is listed as `(same monitor)` if you
+   want a copy on the same screen) and **Open fullscreen**. The `[MIRROR]` tag
+   in the panel follows the window, even while you drag it to another monitor.
 5. Press **Open**. A floating window appears on the chosen monitor showing a live
    copy of the source. Press **F11** on it to go fullscreen and **Esc** to return
    to the floating window.

@@ -621,11 +621,9 @@ unsafe fn open_dialog() {
         return;
     }
     let src = s as usize;
-    let dst: Vec<usize> = (0..mons.len()).filter(|&i| i != src).collect();
-    if dst.is_empty() {
-        set_text(ui.status, "Only one monitor is connected, nothing to mirror to.");
-        return;
-    }
+    // Every monitor is offered, including the source itself (a copy of the
+    // screen shown on the same screen). The source row is labelled.
+    let dst: Vec<usize> = (0..mons.len()).collect();
 
     let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
     let tab = WS_TABSTOP.0;
@@ -667,12 +665,16 @@ unsafe fn open_dialog() {
     make_ctl(dlg, hinst, w!("BUTTON"), "Cancel", tab, (194, 130, 170, 30), ID_DLG_CANCEL);
 
     for &i in &dst {
-        let t = wide(&mon_label(&mons[i]));
+        let mut label = mon_label(&mons[i]);
+        if i == src {
+            label.push_str(" (same monitor)");
+        }
+        let t = wide(&label);
         SendMessageW(list, M_CB_ADDSTRING, WPARAM(0), LPARAM(t.as_ptr() as isize));
     }
-    // Preselect the destination used last time, or the first one.
+    // Preselect the destination used last time, otherwise another monitor.
     let last = LAST_OPEN.with(|l| l.borrow().clone());
-    let mut sel = 0;
+    let mut sel = dst.iter().position(|&i| i != src).unwrap_or(0);
     if let Some((gdi, was_full)) = last {
         if let Some(p) = dst.iter().position(|&i| mons[i].gdi == gdi) {
             sel = p;
@@ -726,6 +728,11 @@ unsafe fn start_mirror(ui: Ui, src: usize, dst: usize, fullscreen: bool) {
         return;
     }
     let vsync = SendMessageW(ui.chk_vsync, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
+    let shown_on = if src == dst {
+        format!("{} (same monitor)", mons[dst].name)
+    } else {
+        mons[dst].name.clone()
+    };
 
     match Mirror::start(&mons[src], &mons[dst], vsync) {
         Ok(mut m) => {
@@ -739,7 +746,7 @@ unsafe fn start_mirror(ui: Ui, src: usize, dst: usize, fullscreen: bool) {
                 &format!(
                     "Mirroring {} on {}{}.\r\nPress F11 in the mirror window for fullscreen.",
                     mons[src].name,
-                    mons[dst].name,
+                    shown_on,
                     if fullscreen { " (fullscreen)" } else { "" }
                 ),
             );
