@@ -7,7 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use windows::{
     core::*,
@@ -33,7 +33,12 @@ use windows::{
                 RoInitialize, RO_INIT_MULTITHREADED,
             },
         },
-        UI::{HiDpi::*, Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*},
+        UI::{
+            HiDpi::*,
+            Input::KeyboardAndMouse::EnableWindow,
+            Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW},
+            WindowsAndMessaging::*,
+        },
     },
 };
 
@@ -61,12 +66,19 @@ const M_BM_SETCHECK: u32 = 0x00F1;
 const M_WM_SETFONT: u32 = 0x0030;
 
 const WM_MIRROR_CLOSED: u32 = WM_APP + 1;
+const WM_TRAY: u32 = WM_APP + 2;
+
+// Tray menu commands
+const ID_TRAY_OPEN: i32 = 1001;
+const ID_TRAY_EXIT: i32 = 1002;
 
 // Virtual-key codes (Win32::UI::Input::KeyboardAndMouse is not a dependency)
 const VK_F11_KEY: u16 = 0x7A;
 const VK_ESCAPE_KEY: u16 = 0x1B;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static APP_ICON: AtomicIsize = AtomicIsize::new(0);
+static TRAY_VISIBLE: AtomicBool = AtomicBool::new(false);
 
 // ------------------------------------------------------------------ helpers
 
@@ -797,6 +809,70 @@ unsafe fn start_mirror(ui: Ui, src: usize, dst: usize, fullscreen: bool) {
     }
 }
 
+// ------------------------------------------------------------------ tray icon
+
+fn tray_data(h: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: h,
+        uID: 1,
+        ..Default::default()
+    }
+}
+
+unsafe fn tray_add(h: HWND) {
+    let mut nid = tray_data(h);
+    nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    nid.uCallbackMessage = WM_TRAY;
+    nid.hIcon = HICON(APP_ICON.load(Ordering::Relaxed) as *mut c_void);
+    let tip: Vec<u16> = "Screen Mirror".encode_utf16().collect();
+    for (i, c) in tip.iter().take(nid.szTip.len().saturating_sub(1)).enumerate() {
+        nid.szTip[i] = *c;
+    }
+    if Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+        TRAY_VISIBLE.store(true, Ordering::Relaxed);
+    }
+}
+
+unsafe fn tray_remove(h: HWND) {
+    if !TRAY_VISIBLE.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let nid = tray_data(h);
+    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+unsafe fn restore_from_tray(h: HWND) {
+    tray_remove(h);
+    let _ = ShowWindow(h, SW_SHOW);
+    let _ = ShowWindow(h, SW_RESTORE);
+    let _ = SetForegroundWindow(h);
+}
+
+unsafe fn tray_menu(h: HWND) {
+    let menu = match CreatePopupMenu() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN as usize, w!("Open"));
+    let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT as usize, w!("Exit"));
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    // Required so the menu closes when clicking elsewhere.
+    let _ = SetForegroundWindow(h);
+    let _ = TrackPopupMenu(
+        menu,
+        TPM_RIGHTBUTTON | TPM_LEFTALIGN,
+        pt.x,
+        pt.y,
+        0,
+        h,
+        None,
+    );
+    let _ = DestroyMenu(menu);
+    let _ = PostMessageW(h, WM_NULL, WPARAM(0), LPARAM(0));
+}
+
 // ------------------------------------------------------------------ window procs
 
 unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -812,12 +888,36 @@ unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRE
             match id {
                 ID_START => toggle(),
                 ID_REFRESH => refresh_monitors(),
+                ID_TRAY_OPEN => restore_from_tray(h),
+                ID_TRAY_EXIT => {
+                    let _ = DestroyWindow(h);
+                }
                 // CBN_SELCHANGE = 1
                 ID_SRC if code == 1 => {
                     if let Some(ui) = UI.with(|u| *u.borrow()) {
                         let _ = InvalidateRect(ui.panel, None, FALSE);
                     }
                 }
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        // Minimizing hides the window and leaves only the tray icon.
+        WM_SIZE => {
+            if w.0 as u32 == SIZE_MINIMIZED {
+                tray_add(h);
+                // Only hide if the icon is really in the tray, so the window can
+                // never get lost.
+                if TRAY_VISIBLE.load(Ordering::Relaxed) {
+                    let _ = ShowWindow(h, SW_HIDE);
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TRAY => {
+            match (l.0 & 0xFFFF) as u32 {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => restore_from_tray(h),
+                WM_RBUTTONUP => tray_menu(h),
                 _ => {}
             }
             LRESULT(0)
@@ -830,6 +930,7 @@ unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRE
             LRESULT(0)
         }
         WM_DESTROY => {
+            tray_remove(h);
             stop();
             PostQuitMessage(0);
             LRESULT(0)
@@ -1085,6 +1186,7 @@ fn main() -> Result<()> {
 
         // Icon embedded by build.rs (resource with ID 1)
         let icon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
+        APP_ICON.store(icon.0 as isize, Ordering::Relaxed);
 
         // Control window class
         let wc = WNDCLASSEXW {

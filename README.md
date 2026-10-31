@@ -22,6 +22,7 @@ on the monitor of your choice (a TV, a second screen, a capture device, etc.).
 - The mirror opens as a floating window on the chosen monitor; press
   **F11** to make it fullscreen and **Esc** to go back
 - Starting the mirror never takes focus, so it won't pull you out of a game
+- Minimizing the window sends it to the system tray; the mirror keeps running
 - GPU-only pipeline (no CPU copies), no console window, a single small executable
 
 ## How it works
@@ -73,6 +74,10 @@ The optimized executable ends up in `target\release\screen-mirror.exe`.
    to the floating window.
 6. Press **Stop** to close the mirror. Use **Refresh monitors** if you connect a
    display or change a resolution while the program is open.
+7. **Minimizing** the window hides it to the system tray and the mirror keeps
+   running. Click the tray icon to bring the window back, or right click it for
+   **Open** and **Exit**. On Windows 11 the icon may live in the hidden-icons
+   overflow until you pin it.
 
 While the mirror is running, the selection is locked; stop it first to change it.
 
@@ -89,6 +94,8 @@ While the mirror is running, the selection is locked; stop it first to change it
 - **Keyboard:** **F11** and **Esc** act on the mirror window, so click it once if
   it does not have focus. Start it with the mouse in the control window and the
   mirror will not steal focus from your game.
+- **Tray:** with the window minimized the app only lives in the system tray.
+  If the icon is not visible, check the hidden-icons overflow next to the clock.
 - **Performance:** capturing costs some GPU time. If you are sensitive to it,
   compare your frame rate with and without the program running.
 - **Latency:** VSync is off by default for the lowest latency; the copy is
