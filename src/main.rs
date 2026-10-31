@@ -4,7 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -496,6 +496,9 @@ thread_local! {
     static OPEN_DLG: RefCell<Option<OpenDlg>> = RefCell::new(None);
     // Last destination (GDI name) and fullscreen choice, remembered per session.
     static LAST_OPEN: RefCell<Option<(String, bool)>> = RefCell::new(None);
+    // Fullscreen ticked in the dialog, so it can be restored when the source
+    // monitor is deselected. Fullscreen is not allowed on the same monitor.
+    static FULL_PREF: Cell<bool> = Cell::new(false);
 }
 
 unsafe fn make_ctl(
@@ -675,20 +678,42 @@ unsafe fn open_dialog() {
     // Preselect the destination used last time, otherwise another monitor.
     let last = LAST_OPEN.with(|l| l.borrow().clone());
     let mut sel = dst.iter().position(|&i| i != src).unwrap_or(0);
+    let mut full_pref = false;
     if let Some((gdi, was_full)) = last {
         if let Some(p) = dst.iter().position(|&i| mons[i].gdi == gdi) {
             sel = p;
         }
-        SendMessageW(full, M_BM_SETCHECK, WPARAM(if was_full { 1 } else { 0 }), LPARAM(0));
+        full_pref = was_full;
     }
+    SendMessageW(full, M_BM_SETCHECK, WPARAM(if full_pref { 1 } else { 0 }), LPARAM(0));
+    FULL_PREF.with(|p| p.set(full_pref));
     SendMessageW(list, M_CB_SETCURSEL, WPARAM(sel), LPARAM(0));
 
     OPEN_DLG.with(|d| {
         *d.borrow_mut() = Some(OpenDlg { hwnd: dlg, list, full, src, dst });
     });
+    sync_dialog_fullscreen();
     let _ = EnableWindow(main, false);
     let _ = ShowWindow(dlg, SW_SHOW);
     let _ = SetForegroundWindow(dlg);
+}
+
+/// Enables the fullscreen tick only when the mirror goes to another monitor,
+/// and keeps it unchecked while the source monitor itself is selected.
+unsafe fn sync_dialog_fullscreen() {
+    let d = match OPEN_DLG.with(|d| d.borrow().clone()) {
+        Some(d) => d,
+        None => return,
+    };
+    let sel = SendMessageW(d.list, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
+    let same = sel >= 0 && d.dst.get(sel as usize) == Some(&d.src);
+    if same {
+        SendMessageW(d.full, M_BM_SETCHECK, WPARAM(0), LPARAM(0));
+    } else {
+        let pref = FULL_PREF.with(|p| p.get());
+        SendMessageW(d.full, M_BM_SETCHECK, WPARAM(if pref { 1 } else { 0 }), LPARAM(0));
+    }
+    let _ = EnableWindow(d.full, !same);
 }
 
 unsafe fn close_open_dialog() {
@@ -713,9 +738,20 @@ unsafe fn open_selected() {
             return;
         }
         let dst = d.dst[sel as usize];
-        let full = SendMessageW(d.full, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
+        // Fullscreen is not allowed on the same monitor: a fullscreen copy of a
+        // screen on top of itself is unusable.
+        let full = if dst == d.src {
+            false
+        } else {
+            SendMessageW(d.full, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1
+        };
         let gdi = MONS.with(|m| m.borrow()[dst].gdi.clone());
-        LAST_OPEN.with(|l| *l.borrow_mut() = Some((gdi, full)));
+        if dst != d.src {
+            FULL_PREF.with(|p| p.set(full));
+        }
+        // Keep the fullscreen preference when the source itself is selected.
+        let remembered_full = if dst == d.src { FULL_PREF.with(|p| p.get()) } else { full };
+        LAST_OPEN.with(|l| *l.borrow_mut() = Some((gdi, remembered_full)));
         (d.src, dst, full)
     };
     close_open_dialog();
@@ -802,13 +838,28 @@ unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRE
     }
 }
 
-unsafe extern "system" fn dialog_proc(h: HWND, m: u32, w: WPARAM, _l: LPARAM) -> LRESULT {
+unsafe extern "system" fn dialog_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match m {
         WM_COMMAND => {
+            let id = (w.0 & 0xFFFF) as i32;
+            let code = ((w.0 >> 16) & 0xFFFF) as u32;
             // IsDialogMessageW sends IDOK (1) for Enter and IDCANCEL (2) for Esc.
-            match (w.0 & 0xFFFF) as i32 {
+            match id {
                 ID_DLG_OPEN | 1 => open_selected(),
                 ID_DLG_CANCEL | 2 => close_open_dialog(),
+                // CBN_SELCHANGE = 1: keep fullscreen in sync with the monitor.
+                ID_DLG_LIST if code == 1 => sync_dialog_fullscreen(),
+                // BN_CLICKED = 0: remember the tick for the next monitor.
+                ID_DLG_FULL if code == 0 => {
+                    let on = SendMessageW(
+                        HWND(l.0 as *mut c_void),
+                        M_BM_GETCHECK,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                    .0 == 1;
+                    FULL_PREF.with(|p| p.set(on));
+                }
                 _ => {}
             }
             LRESULT(0)
@@ -825,7 +876,7 @@ unsafe extern "system" fn dialog_proc(h: HWND, m: u32, w: WPARAM, _l: LPARAM) ->
             let _ = EnableWindow(main, true);
             LRESULT(0)
         }
-        _ => DefWindowProcW(h, m, w, _l),
+        _ => DefWindowProcW(h, m, w, l),
     }
 }
 

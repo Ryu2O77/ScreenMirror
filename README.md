@@ -65,8 +65,9 @@ The optimized executable ends up in `target\release\screen-mirror.exe`.
 3. Optionally tick **VSync** to avoid tearing at the cost of a little latency.
 4. Press **Open monitor...**. A small dialog asks **Show on** (which monitor
    displays the copy; the source monitor is listed as `(same monitor)` if you
-   want a copy on the same screen) and **Open fullscreen**. The `[MIRROR]` tag
-   in the panel follows the window, even while you drag it to another monitor.
+   want a copy on the same screen, in which case **Open fullscreen** is disabled)
+   and **Open fullscreen**. The `[MIRROR]` tag in the panel follows the window,
+   even while you drag it to another monitor.
 5. Press **Open**. A floating window appears on the chosen monitor showing a live
    copy of the source. Press **F11** on it to go fullscreen and **Esc** to return
    to the floating window.
