@@ -1,6 +1,6 @@
-//! screen-mirror (GUI): duplica un monitor en otro con Windows Graphics Capture + D3D11.
-//! Ventana de control con selectores de origen/destino. La ventana espejo no roba el foco
-//! (para no sacarte de CS); se detiene con el boton "Detener".
+//! screen-mirror (GUI): mirrors one monitor onto another with Windows Graphics Capture + D3D11.
+//! Control window with source/destination pickers. The mirror window never takes focus
+//! (so it will not pull you out of a game); stop it with the "Stop" button.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -39,14 +39,14 @@ use windows::{
 
 const PIXEL_FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
-// IDs de controles
+// Control IDs
 const ID_START: i32 = 1;
 const ID_REFRESH: i32 = 2;
 const ID_VSYNC: i32 = 3;
 const ID_SRC: i32 = 4;
 const ID_DST: i32 = 5;
 
-// Mensajes de controles (literales para no depender de tipos de constantes)
+// Control messages (literals so we do not depend on constant types)
 const M_CB_ADDSTRING: u32 = 0x0143;
 const M_CB_GETCURSEL: u32 = 0x0147;
 const M_CB_SETCURSEL: u32 = 0x014E;
@@ -58,7 +58,7 @@ const WM_MIRROR_CLOSED: u32 = WM_APP + 1;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
-// ------------------------------------------------------------------ utilidades
+// ------------------------------------------------------------------ helpers
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -82,8 +82,8 @@ struct Mon {
     h: HMONITOR,
     rect: RECT,
     primary: bool,
-    gdi: String,  // p. ej. \\.\DISPLAY3
-    name: String, // nombre del monitor segun su EDID
+    gdi: String,  // e.g. \\.\DISPLAY3
+    name: String, // monitor name from its EDID
 }
 
 fn utf16_to_string(a: &[u16]) -> String {
@@ -91,7 +91,7 @@ fn utf16_to_string(a: &[u16]) -> String {
     String::from_utf16_lossy(&a[..n])
 }
 
-/// Devuelve pares (nombre GDI, nombre amigable) de los monitores activos.
+/// Returns (GDI name, friendly name) pairs for the active monitors.
 fn friendly_names() -> Vec<(String, String)> {
     let mut out = Vec::new();
     unsafe {
@@ -169,24 +169,24 @@ fn monitors() -> Vec<Mon> {
             m.name = n.clone();
         }
         if m.name.trim().is_empty() {
-            m.name = "Monitor sin nombre".to_string();
+            m.name = "Unnamed monitor".to_string();
         }
     }
     v
 }
 
-/// Etiqueta para mostrar: "LG TV SSCR2 - 1920x1080 [principal]".
+/// Display label: "LG TV SSCR2 - 1920x1080 [primary]".
 fn mon_label(m: &Mon) -> String {
     format!(
         "{} - {}x{}{}",
         m.name,
         m.rect.right - m.rect.left,
         m.rect.bottom - m.rect.top,
-        if m.primary { " [principal]" } else { "" }
+        if m.primary { " [primary]" } else { "" }
     )
 }
 
-// ------------------------------------------------------------------ motor de espejo
+// ------------------------------------------------------------------ mirror engine
 
 struct Mirror {
     hwnd: HWND,
@@ -201,7 +201,7 @@ impl Mirror {
     fn start(src: &Mon, dst: &Mon, vsync: bool) -> Result<Mirror> {
         let sync: u32 = if vsync { 1 } else { 0 };
 
-        // Ventana sin bordes sobre el monitor destino, sin robar foco.
+        // Borderless window on the destination monitor that does not take focus.
         let hwnd = unsafe {
             let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
             let r = dst.rect;
@@ -248,7 +248,7 @@ impl Mirror {
         GraphicsCaptureSession,
         windows::Foundation::EventRegistrationToken,
     )> {
-        // Device D3D11
+        // D3D11 device
         let mut device: Option<ID3D11Device> = None;
         let mut ctx: Option<ID3D11DeviceContext> = None;
         unsafe {
@@ -274,12 +274,12 @@ impl Mirror {
         let winrt_dev: IDirect3DDevice =
             unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi_dev)?.cast()? };
 
-        // Captura del monitor origen
+        // Capture the source monitor
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(src.h)? };
         let size = item.Size()?;
 
-        // Swapchain (STRETCH: DWM la escala a la ventana)
+        // Swap chain (STRETCH: DWM scales it to the window)
         let factory2: IDXGIFactory2 = unsafe { dxgi_dev.GetAdapter()?.GetParent()? };
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: size.Width as u32,
@@ -319,7 +319,7 @@ impl Mirror {
                 Ok(f) => f,
                 Err(_) => return Ok(()),
             };
-            // Si cambia la resolucion del origen, recrea el pool y salta este frame.
+            // If the source resolution changes, recreate the pool and skip this frame.
             let cs = frame.ContentSize()?;
             let cs_u = (cs.Width as u32, cs.Height as u32);
             if cs_u != pool_size {
@@ -354,7 +354,7 @@ impl Mirror {
 
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(true);
-        // Solo en Windows 11; en Windows 10 se ignora (borde amarillo).
+        // Windows 11 only; ignored on Windows 10 (yellow border).
         let _ = session.SetIsBorderRequired(false);
         session.StartCapture()?;
 
@@ -375,7 +375,7 @@ impl Drop for Mirror {
     }
 }
 
-// ------------------------------------------------------------------ estado de la GUI
+// ------------------------------------------------------------------ GUI state
 
 #[derive(Clone, Copy)]
 struct Ui {
@@ -428,24 +428,24 @@ unsafe fn build_ui(parent: HWND) {
     let tab = WS_TABSTOP.0;
 
     let panel = make_ctl(parent, hinst, w!("ScreenMirrorPanel"), "", 0, (16, 14, 328, 160), 0);
-    make_ctl(parent, hinst, w!("STATIC"), "Clic izquierdo: origen   |   Clic derecho: destino", 0, (16, 178, 328, 18), 0);
+    make_ctl(parent, hinst, w!("STATIC"), "Left click: source   |   Right click: destination", 0, (16, 178, 328, 18), 0);
 
-    make_ctl(parent, hinst, w!("STATIC"), "Monitor origen (el que quieres copiar):", 0, (16, 206, 328, 18), 0);
+    make_ctl(parent, hinst, w!("STATIC"), "Source monitor (the one to copy):", 0, (16, 206, 328, 18), 0);
     let cb_src = make_ctl(parent, hinst, w!("COMBOBOX"), "", 0x3 | tab, (16, 226, 328, 200), ID_SRC);
-    make_ctl(parent, hinst, w!("STATIC"), "Monitor destino (donde se mostrara):", 0, (16, 262, 328, 18), 0);
+    make_ctl(parent, hinst, w!("STATIC"), "Destination monitor (where it is shown):", 0, (16, 262, 328, 18), 0);
     let cb_dst = make_ctl(parent, hinst, w!("COMBOBOX"), "", 0x3 | tab, (16, 282, 328, 200), ID_DST);
     let chk_vsync = make_ctl(
         parent,
         hinst,
         w!("BUTTON"),
-        "VSync (sin tearing, algo mas de latencia)",
+        "VSync (no tearing, a little more latency)",
         0x3 | tab, // BS_AUTOCHECKBOX
         (16, 318, 328, 22),
         ID_VSYNC,
     );
-    let btn_start = make_ctl(parent, hinst, w!("BUTTON"), "Iniciar", 0x1 | tab, (16, 352, 160, 30), ID_START);
-    make_ctl(parent, hinst, w!("BUTTON"), "Actualizar monitores", tab, (184, 352, 160, 30), ID_REFRESH);
-    let status = make_ctl(parent, hinst, w!("STATIC"), "Listo.", 0, (16, 396, 328, 40), 0);
+    let btn_start = make_ctl(parent, hinst, w!("BUTTON"), "Start", 0x1 | tab, (16, 352, 160, 30), ID_START);
+    make_ctl(parent, hinst, w!("BUTTON"), "Refresh monitors", tab, (184, 352, 160, 30), ID_REFRESH);
+    let status = make_ctl(parent, hinst, w!("STATIC"), "Ready.", 0, (16, 396, 328, 40), 0);
 
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui { panel, cb_src, cb_dst, chk_vsync, btn_start, status });
@@ -489,9 +489,9 @@ unsafe fn stop() {
     let was_running = m.is_some();
     drop(m);
     if let Some(ui) = UI.with(|u| *u.borrow()) {
-        set_text(ui.btn_start, "Iniciar");
+        set_text(ui.btn_start, "Start");
         if was_running {
-            set_text(ui.status, "Detenido.");
+            set_text(ui.status, "Stopped.");
         }
         let _ = InvalidateRect(ui.panel, None, FALSE);
     }
@@ -511,11 +511,11 @@ unsafe fn toggle() {
     let d = SendMessageW(ui.cb_dst, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
     let mons = MONS.with(|m| m.borrow().clone());
     if s < 0 || d < 0 || s as usize >= mons.len() || d as usize >= mons.len() {
-        set_text(ui.status, "Selecciona un monitor de origen y uno de destino.");
+        set_text(ui.status, "Select a source monitor and a destination monitor.");
         return;
     }
     if s == d {
-        set_text(ui.status, "El origen y el destino deben ser distintos.");
+        set_text(ui.status, "Source and destination must be different.");
         return;
     }
     let vsync = SendMessageW(ui.chk_vsync, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
@@ -526,11 +526,11 @@ unsafe fn toggle() {
             m.dst_idx = d as usize;
             MIRROR.with(|c| *c.borrow_mut() = Some(m));
             let _ = InvalidateRect(ui.panel, None, FALSE);
-            set_text(ui.btn_start, "Detener");
+            set_text(ui.btn_start, "Stop");
             set_text(
                 ui.status,
                 &format!(
-                    "Duplicando {} en {}.",
+                    "Mirroring {} on {}.",
                     mons[s as usize].name, mons[d as usize].name
                 ),
             );
@@ -598,9 +598,9 @@ unsafe extern "system" fn mirror_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> 
     }
 }
 
-// ------------------------------------------------------------------ panel de monitores
+// ------------------------------------------------------------------ monitor panel
 
-/// Escala la disposicion real de los monitores al area (w x h) del panel.
+/// Scales the real monitor arrangement into the (w x h) area of the panel.
 fn layout(mons: &[Mon], w: i32, h: i32) -> Vec<RECT> {
     if mons.is_empty() {
         return Vec::new();
@@ -632,7 +632,7 @@ unsafe fn paint_panel(h: HWND) {
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
 
-    // Colores en formato 0x00BBGGRR
+    // Colors in 0x00BBGGRR format
     let bg = CreateSolidBrush(COLORREF(0x0028_2420));
     FillRect(hdc, &rc, bg);
     let _ = DeleteObject(HGDIOBJ(bg.0));
@@ -640,7 +640,7 @@ unsafe fn paint_panel(h: HWND) {
     let mons = MONS.with(|m| m.borrow().clone());
     let rects = layout(&mons, rc.right, rc.bottom);
 
-    // Si hay espejo activo, se muestra su par; si no, la seleccion de los desplegables.
+    // While mirroring, show its pair; otherwise show the drop-down selection.
     let running = MIRROR.with(|c| c.borrow().as_ref().map(|m| (m.src_idx, m.dst_idx)));
     let (si, di) = match running {
         Some((s, d)) => (s as i32, d as i32),
@@ -667,11 +667,11 @@ unsafe fn paint_panel(h: HWND) {
         r.bottom -= 1;
 
         let (color, tag) = if i as i32 == si && i as i32 == di {
-            (0x0000_80F0, "\r\n[ORIGEN y DESTINO]")
+            (0x0000_80F0, "\r\n[SOURCE and DESTINATION]")
         } else if i as i32 == si {
-            (0x00F6_7834, "\r\n[ORIGEN]")
+            (0x00F6_7834, "\r\n[SOURCE]")
         } else if i as i32 == di {
-            (0x0043_A02E, "\r\n[DESTINO]")
+            (0x0043_A02E, "\r\n[DESTINATION]")
         } else {
             (0x0050_4A44, "")
         };
@@ -685,7 +685,7 @@ unsafe fn paint_panel(h: HWND) {
             m.name,
             m.rect.right - m.rect.left,
             m.rect.bottom - m.rect.top,
-            if m.primary { " (principal)" } else { "" },
+            if m.primary { " (primary)" } else { "" },
             tag
         );
         let mut buf: Vec<u16> = text.encode_utf16().collect();
@@ -696,7 +696,7 @@ unsafe fn paint_panel(h: HWND) {
             bottom: r.bottom - 4,
         };
         let fmt = DT_CENTER | DT_WORDBREAK | DT_NOPREFIX;
-        // Centrado vertical: se mide primero el alto del texto.
+        // Vertical centering: measure the text height first.
         let mut calc = inner;
         DrawTextW(hdc, &mut buf, &mut calc, fmt | DT_CALCRECT);
         let free = (inner.bottom - inner.top) - (calc.bottom - calc.top);
@@ -713,7 +713,7 @@ unsafe fn paint_panel(h: HWND) {
 
 unsafe fn panel_click(h: HWND, right: bool, l: LPARAM) {
     if MIRROR.with(|c| c.borrow().is_some()) {
-        return; // con el espejo activo no se cambia la seleccion
+        return; // the selection cannot change while mirroring
     }
     let ui = match UI.with(|u| *u.borrow()) {
         Some(u) => u,
@@ -738,7 +738,7 @@ unsafe fn panel_click(h: HWND, right: bool, l: LPARAM) {
         if right {
             d = i;
             if s == i && cur_d >= 0 {
-                s = cur_d; // si coinciden, se intercambian
+                s = cur_d; // if they collide, swap them
             }
         } else {
             s = i;
@@ -784,10 +784,10 @@ fn main() -> Result<()> {
 
         let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
 
-        // Icono incrustado por build.rs (recurso con ID 1)
+        // Icon embedded by build.rs (resource with ID 1)
         let icon = LoadIconW(hinst, PCWSTR(1usize as *const u16)).unwrap_or_default();
 
-        // Clase de la ventana de control
+        // Control window class
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(ctl_proc),
@@ -801,7 +801,7 @@ fn main() -> Result<()> {
         };
         RegisterClassExW(&wc);
 
-        // Clase de la ventana espejo (fondo negro)
+        // Mirror window class (black background)
         let black = GetStockObject(BLACK_BRUSH);
         let wc2 = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
@@ -813,7 +813,7 @@ fn main() -> Result<()> {
         };
         RegisterClassExW(&wc2);
 
-        // Clase del panel que dibuja los monitores
+        // Class of the panel that draws the monitors
         let wc3 = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(panel_proc),
