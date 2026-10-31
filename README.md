@@ -14,9 +14,11 @@ on the monitor of your choice (a TV, a second screen, a capture device, etc.).
 - Keeps working when the source resolution changes while it is running
 - Real monitor names (read from the display's EDID) instead of "Display 2"
 - Visual layout panel that draws your monitors in their real arrangement:
-  left click to pick the source, right click to pick the destination
+  left click a monitor to pick the one to mirror
+- The **Open monitor** dialog asks where to show the copy and whether it should
+  start fullscreen, remembering both choices for the next time
 - Optional VSync
-- The mirror opens as a floating window on the destination monitor; press
+- The mirror opens as a floating window on the chosen monitor; press
   **F11** to make it fullscreen and **Esc** to go back
 - Starting the mirror never takes focus, so it won't pull you out of a game
 - GPU-only pipeline (no CPU copies), no console window, a single small executable
@@ -57,15 +59,16 @@ The optimized executable ends up in `target\release\screen-mirror.exe`.
 
 1. Start the program. The panel at the top shows your monitors as they are
    arranged in Windows.
-2. **Left click** a monitor to use it as the **source** (blue) and
-   **right click** another one to use it as the **destination** (green). You can
-   also use the two drop-down lists. Choosing a monitor that is already used for
-   the other role swaps the two.
+2. Select the monitor you want to copy, either with the drop-down list or with a
+   **left click** on the panel (it turns blue and is tagged `[SOURCE]`).
 3. Optionally tick **VSync** to avoid tearing at the cost of a little latency.
-4. Press **Start**. A floating window appears on the destination monitor showing
-   a live copy of the source. Press **F11** on it to go fullscreen and **Esc** to
-   return to the floating window.
-5. Press **Stop** to close the mirror. Use **Refresh monitors** if you connect a
+4. Press **Open monitor...**. A small dialog asks **Show on** (which monitor
+   displays the copy) and **Open fullscreen**. The `[MIRROR]` tag in the panel
+   follows the window, even while you drag it to another monitor.
+5. Press **Open**. A floating window appears on the chosen monitor showing a live
+   copy of the source. Press **F11** on it to go fullscreen and **Esc** to return
+   to the floating window.
+6. Press **Stop** to close the mirror. Use **Refresh monitors** if you connect a
    display or change a resolution while the program is open.
 
 While the mirror is running, the selection is locked; stop it first to change it.

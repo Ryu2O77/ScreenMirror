@@ -33,7 +33,7 @@ use windows::{
                 RoInitialize, RO_INIT_MULTITHREADED,
             },
         },
-        UI::{HiDpi::*, WindowsAndMessaging::*},
+        UI::{HiDpi::*, Input::KeyboardAndMouse::EnableWindow, WindowsAndMessaging::*},
     },
 };
 
@@ -44,7 +44,12 @@ const ID_START: i32 = 1;
 const ID_REFRESH: i32 = 2;
 const ID_VSYNC: i32 = 3;
 const ID_SRC: i32 = 4;
-const ID_DST: i32 = 5;
+
+// "Open monitor" dialog control IDs (IDOK/IDCANCEL are 1 and 2)
+const ID_DLG_LIST: i32 = 101;
+const ID_DLG_FULL: i32 = 102;
+const ID_DLG_OPEN: i32 = 103;
+const ID_DLG_CANCEL: i32 = 104;
 
 // Control messages (literals so we do not depend on constant types)
 const M_CB_ADDSTRING: u32 = 0x0143;
@@ -52,6 +57,7 @@ const M_CB_GETCURSEL: u32 = 0x0147;
 const M_CB_SETCURSEL: u32 = 0x014E;
 const M_CB_RESETCONTENT: u32 = 0x014B;
 const M_BM_GETCHECK: u32 = 0x00F0;
+const M_BM_SETCHECK: u32 = 0x00F1;
 const M_WM_SETFONT: u32 = 0x0030;
 
 const WM_MIRROR_CLOSED: u32 = WM_APP + 1;
@@ -468,16 +474,28 @@ impl Drop for Mirror {
 struct Ui {
     panel: HWND,
     cb_src: HWND,
-    cb_dst: HWND,
     chk_vsync: HWND,
     btn_start: HWND,
     status: HWND,
+}
+
+/// State of the "Open monitor" dialog while it is on screen.
+#[derive(Clone)]
+struct OpenDlg {
+    hwnd: HWND,
+    list: HWND,
+    full: HWND,
+    src: usize,
+    dst: Vec<usize>, // monitor index for each row of the list
 }
 
 thread_local! {
     static UI: RefCell<Option<Ui>> = RefCell::new(None);
     static MONS: RefCell<Vec<Mon>> = RefCell::new(Vec::new());
     static MIRROR: RefCell<Option<Mirror>> = RefCell::new(None);
+    static OPEN_DLG: RefCell<Option<OpenDlg>> = RefCell::new(None);
+    // Last destination (GDI name) and fullscreen choice, remembered per session.
+    static LAST_OPEN: RefCell<Option<(String, bool)>> = RefCell::new(None);
 }
 
 unsafe fn make_ctl(
@@ -515,27 +533,25 @@ unsafe fn build_ui(parent: HWND) {
     let tab = WS_TABSTOP.0;
 
     let panel = make_ctl(parent, hinst, w!("ScreenMirrorPanel"), "", 0, (16, 14, 328, 160), 0);
-    make_ctl(parent, hinst, w!("STATIC"), "Left click: source   |   Right click: destination", 0, (16, 178, 328, 18), 0);
+    make_ctl(parent, hinst, w!("STATIC"), "Left click a monitor to choose the one to mirror.", 0, (16, 178, 328, 18), 0);
 
-    make_ctl(parent, hinst, w!("STATIC"), "Source monitor (the one to copy):", 0, (16, 206, 328, 18), 0);
+    make_ctl(parent, hinst, w!("STATIC"), "Monitor to mirror:", 0, (16, 206, 328, 18), 0);
     let cb_src = make_ctl(parent, hinst, w!("COMBOBOX"), "", 0x3 | tab, (16, 226, 328, 200), ID_SRC);
-    make_ctl(parent, hinst, w!("STATIC"), "Destination monitor (where it is shown):", 0, (16, 262, 328, 18), 0);
-    let cb_dst = make_ctl(parent, hinst, w!("COMBOBOX"), "", 0x3 | tab, (16, 282, 328, 200), ID_DST);
     let chk_vsync = make_ctl(
         parent,
         hinst,
         w!("BUTTON"),
         "VSync (no tearing, a little more latency)",
         0x3 | tab, // BS_AUTOCHECKBOX
-        (16, 318, 328, 22),
+        (16, 262, 328, 22),
         ID_VSYNC,
     );
-    let btn_start = make_ctl(parent, hinst, w!("BUTTON"), "Start", 0x1 | tab, (16, 352, 160, 30), ID_START);
-    make_ctl(parent, hinst, w!("BUTTON"), "Refresh monitors", tab, (184, 352, 160, 30), ID_REFRESH);
-    let status = make_ctl(parent, hinst, w!("STATIC"), "Ready.", 0, (16, 396, 328, 40), 0);
+    let btn_start = make_ctl(parent, hinst, w!("BUTTON"), "Open monitor...", 0x1 | tab, (16, 296, 160, 30), ID_START);
+    make_ctl(parent, hinst, w!("BUTTON"), "Refresh monitors", tab, (184, 296, 160, 30), ID_REFRESH);
+    let status = make_ctl(parent, hinst, w!("STATIC"), "Ready.", 0, (16, 334, 328, 42), 0);
 
     UI.with(|u| {
-        *u.borrow_mut() = Some(Ui { panel, cb_src, cb_dst, chk_vsync, btn_start, status });
+        *u.borrow_mut() = Some(Ui { panel, cb_src, chk_vsync, btn_start, status });
     });
     refresh_monitors();
 }
@@ -556,17 +572,13 @@ unsafe fn refresh_monitors() {
         None => return,
     };
     let old_s = SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
-    let old_d = SendMessageW(ui.cb_dst, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
 
     let mons = monitors();
     let n = mons.len() as i32;
     let prim = mons.iter().position(|m| m.primary).unwrap_or(0) as i32;
-    let other = mons.iter().position(|m| !m.primary).unwrap_or(0) as i32;
     let s = if old_s >= 0 && old_s < n { old_s } else { prim };
-    let d = if old_d >= 0 && old_d < n { old_d } else { other };
 
     fill_combo(ui.cb_src, &mons, s);
-    fill_combo(ui.cb_dst, &mons, d);
     MONS.with(|m| *m.borrow_mut() = mons);
     let _ = InvalidateRect(ui.panel, None, FALSE);
 }
@@ -576,7 +588,7 @@ unsafe fn stop() {
     let was_running = m.is_some();
     drop(m);
     if let Some(ui) = UI.with(|u| *u.borrow()) {
-        set_text(ui.btn_start, "Start");
+        set_text(ui.btn_start, "Open monitor...");
         if was_running {
             set_text(ui.status, "Stopped.");
         }
@@ -584,43 +596,157 @@ unsafe fn stop() {
     }
 }
 
+/// Opens the dialog that asks where the mirror will be shown and whether it
+/// starts fullscreen. With the mirror already running, the same button stops it.
 unsafe fn toggle() {
-    let ui = match UI.with(|u| *u.borrow()) {
-        Some(u) => u,
-        None => return,
-    };
     if MIRROR.with(|c| c.borrow().is_some()) {
         stop();
         return;
     }
+    open_dialog();
+}
 
-    let s = SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
-    let d = SendMessageW(ui.cb_dst, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
-    let mons = MONS.with(|m| m.borrow().clone());
-    if s < 0 || d < 0 || s as usize >= mons.len() || d as usize >= mons.len() {
-        set_text(ui.status, "Select a source monitor and a destination monitor.");
+unsafe fn open_dialog() {
+    if OPEN_DLG.with(|d| d.borrow().is_some()) {
         return;
     }
-    if s == d {
-        set_text(ui.status, "Source and destination must be different.");
+    let ui = match UI.with(|u| *u.borrow()) {
+        Some(u) => u,
+        None => return,
+    };
+    let mons = MONS.with(|m| m.borrow().clone());
+    let s = SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
+    if s < 0 || s as usize >= mons.len() {
+        set_text(ui.status, "Select a monitor to mirror first.");
+        return;
+    }
+    let src = s as usize;
+    let dst: Vec<usize> = (0..mons.len()).filter(|&i| i != src).collect();
+    if dst.is_empty() {
+        set_text(ui.status, "Only one monitor is connected, nothing to mirror to.");
+        return;
+    }
+
+    let hinst: HINSTANCE = GetModuleHandleW(None).unwrap().into();
+    let tab = WS_TABSTOP.0;
+
+    let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    let mut r = RECT { left: 0, top: 0, right: 380, bottom: 182 };
+    let _ = AdjustWindowRect(&mut r, style, FALSE);
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+
+    let main = HWND(MAIN_HWND.load(Ordering::Relaxed) as *mut c_void);
+    let mut pr = RECT::default();
+    let _ = GetWindowRect(main, &mut pr);
+    let x = pr.left + ((pr.right - pr.left) - w) / 2;
+    let y = pr.top + ((pr.bottom - pr.top) - h) / 2;
+
+    let dlg = match CreateWindowExW(
+        WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+        w!("ScreenMirrorDlg"),
+        w!("Open monitor"),
+        style,
+        x,
+        y,
+        w,
+        h,
+        main,
+        None,
+        hinst,
+        None,
+    ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    make_ctl(dlg, hinst, w!("STATIC"), &format!("Mirror: {}", mons[src].name), 0, (16, 14, 348, 18), 0);
+    make_ctl(dlg, hinst, w!("STATIC"), "Show on:", 0, (16, 44, 348, 18), 0);
+    let list = make_ctl(dlg, hinst, w!("COMBOBOX"), "", 0x3 | tab, (16, 64, 348, 200), ID_DLG_LIST);
+    let full = make_ctl(dlg, hinst, w!("BUTTON"), "Open fullscreen", 0x3 | tab, (16, 98, 348, 22), ID_DLG_FULL);
+    make_ctl(dlg, hinst, w!("BUTTON"), "Open", 0x1 | tab, (16, 130, 170, 30), ID_DLG_OPEN);
+    make_ctl(dlg, hinst, w!("BUTTON"), "Cancel", tab, (194, 130, 170, 30), ID_DLG_CANCEL);
+
+    for &i in &dst {
+        let t = wide(&mon_label(&mons[i]));
+        SendMessageW(list, M_CB_ADDSTRING, WPARAM(0), LPARAM(t.as_ptr() as isize));
+    }
+    // Preselect the destination used last time, or the first one.
+    let last = LAST_OPEN.with(|l| l.borrow().clone());
+    let mut sel = 0;
+    if let Some((gdi, was_full)) = last {
+        if let Some(p) = dst.iter().position(|&i| mons[i].gdi == gdi) {
+            sel = p;
+        }
+        SendMessageW(full, M_BM_SETCHECK, WPARAM(if was_full { 1 } else { 0 }), LPARAM(0));
+    }
+    SendMessageW(list, M_CB_SETCURSEL, WPARAM(sel), LPARAM(0));
+
+    OPEN_DLG.with(|d| {
+        *d.borrow_mut() = Some(OpenDlg { hwnd: dlg, list, full, src, dst });
+    });
+    let _ = EnableWindow(main, false);
+    let _ = ShowWindow(dlg, SW_SHOW);
+    let _ = SetForegroundWindow(dlg);
+}
+
+unsafe fn close_open_dialog() {
+    let h = OPEN_DLG.with(|d| d.borrow().as_ref().map(|x| x.hwnd));
+    if let Some(h) = h {
+        let _ = DestroyWindow(h);
+    }
+}
+
+unsafe fn open_selected() {
+    let ui = match UI.with(|u| *u.borrow()) {
+        Some(u) => u,
+        None => return,
+    };
+    let (src, dst, fullscreen) = {
+        let d = match OPEN_DLG.with(|d| d.borrow().clone()) {
+            Some(d) => d,
+            None => return,
+        };
+        let sel = SendMessageW(d.list, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
+        if sel < 0 || sel as usize >= d.dst.len() {
+            return;
+        }
+        let dst = d.dst[sel as usize];
+        let full = SendMessageW(d.full, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
+        let gdi = MONS.with(|m| m.borrow()[dst].gdi.clone());
+        LAST_OPEN.with(|l| *l.borrow_mut() = Some((gdi, full)));
+        (d.src, dst, full)
+    };
+    close_open_dialog();
+    start_mirror(ui, src, dst, fullscreen);
+}
+
+unsafe fn start_mirror(ui: Ui, src: usize, dst: usize, fullscreen: bool) {
+    let mons = MONS.with(|m| m.borrow().clone());
+    if src >= mons.len() || dst >= mons.len() {
         return;
     }
     let vsync = SendMessageW(ui.chk_vsync, M_BM_GETCHECK, WPARAM(0), LPARAM(0)).0 == 1;
 
-    match Mirror::start(&mons[s as usize], &mons[d as usize], vsync) {
+    match Mirror::start(&mons[src], &mons[dst], vsync) {
         Ok(mut m) => {
-            m.src_idx = s as usize;
-            m.dst_idx = d as usize;
+            m.src_idx = src;
+            m.dst_idx = dst;
+            let hwnd = m.hwnd;
             MIRROR.with(|c| *c.borrow_mut() = Some(m));
-            let _ = InvalidateRect(ui.panel, None, FALSE);
             set_text(ui.btn_start, "Stop");
             set_text(
                 ui.status,
                 &format!(
-                    "Mirroring {} on {}.\r\nPress F11 in the mirror window for fullscreen.",
-                    mons[s as usize].name, mons[d as usize].name
+                    "Mirroring {} on {}{}.\r\nPress F11 in the mirror window for fullscreen.",
+                    mons[src].name,
+                    mons[dst].name,
+                    if fullscreen { " (fullscreen)" } else { "" }
                 ),
             );
+            if fullscreen {
+                toggle_fullscreen(hwnd);
+            }
+            let _ = InvalidateRect(ui.panel, None, FALSE);
         }
         Err(e) => {
             set_text(ui.status, &format!("Error: {}", e.message()));
@@ -644,7 +770,7 @@ unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRE
                 ID_START => toggle(),
                 ID_REFRESH => refresh_monitors(),
                 // CBN_SELCHANGE = 1
-                ID_SRC | ID_DST if code == 1 => {
+                ID_SRC if code == 1 => {
                     if let Some(ui) = UI.with(|u| *u.borrow()) {
                         let _ = InvalidateRect(ui.panel, None, FALSE);
                     }
@@ -666,6 +792,33 @@ unsafe extern "system" fn ctl_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRE
             LRESULT(0)
         }
         _ => DefWindowProcW(h, m, w, l),
+    }
+}
+
+unsafe extern "system" fn dialog_proc(h: HWND, m: u32, w: WPARAM, _l: LPARAM) -> LRESULT {
+    match m {
+        WM_COMMAND => {
+            // IsDialogMessageW sends IDOK (1) for Enter and IDCANCEL (2) for Esc.
+            match (w.0 & 0xFFFF) as i32 {
+                ID_DLG_OPEN | 1 => open_selected(),
+                ID_DLG_CANCEL | 2 => close_open_dialog(),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            close_open_dialog();
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            OPEN_DLG.with(|d| {
+                d.borrow_mut().take();
+            });
+            let main = HWND(MAIN_HWND.load(Ordering::Relaxed) as *mut c_void);
+            let _ = EnableWindow(main, true);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(h, m, w, _l),
     }
 }
 
@@ -748,18 +901,21 @@ unsafe fn paint_panel(h: HWND) {
     let mons = MONS.with(|m| m.borrow().clone());
     let rects = layout(&mons, rc.right, rc.bottom);
 
-    // While mirroring, show its pair; otherwise show the drop-down selection.
-    let running = MIRROR.with(|c| c.borrow().as_ref().map(|m| (m.src_idx, m.dst_idx)));
-    let (si, di) = match running {
-        Some((s, d)) => (s as i32, d as i32),
-        None => match UI.with(|u| *u.borrow()) {
-            Some(ui) => (
-                SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32,
-                SendMessageW(ui.cb_dst, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32,
-            ),
-            None => (-1, -1),
-        },
-    };
+    // Source: the running mirror, otherwise the drop-down selection.
+    let src_idx = MIRROR.with(|c| c.borrow().as_ref().map(|m| m.src_idx as i32)).unwrap_or_else(|| {
+        UI.with(|u| match *u.borrow() {
+            Some(ui) => SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32,
+            None => -1,
+        })
+    });
+
+    // The mirror is shown wherever its window is right now: it can be dragged.
+    let dst_idx = MIRROR.with(|c| {
+        c.borrow().as_ref().and_then(|m| {
+            let mon = MonitorFromWindow(m.hwnd, MONITOR_DEFAULTTONEAREST);
+            MONS.with(|ms| ms.borrow().iter().position(|x| x.h == mon).map(|p| p as i32))
+        })
+    });
 
     let font = GetStockObject(DEFAULT_GUI_FONT);
     let old_font = SelectObject(hdc, font);
@@ -774,12 +930,13 @@ unsafe fn paint_panel(h: HWND) {
         r.right -= 1;
         r.bottom -= 1;
 
-        let (color, tag) = if i as i32 == si && i as i32 == di {
-            (0x0000_80F0, "\r\n[SOURCE and DESTINATION]")
-        } else if i as i32 == si {
+        let i = i as i32;
+        let (color, tag) = if i == src_idx && Some(i) == dst_idx {
+            (0x0000_80F0, "\r\n[SOURCE and MIRROR]")
+        } else if i == src_idx {
             (0x00F6_7834, "\r\n[SOURCE]")
-        } else if i as i32 == di {
-            (0x0043_A02E, "\r\n[DESTINATION]")
+        } else if Some(i) == dst_idx {
+            (0x0043_A02E, "\r\n[MIRROR]")
         } else {
             (0x0050_4A44, "")
         };
@@ -819,7 +976,7 @@ unsafe fn paint_panel(h: HWND) {
     let _ = EndPaint(h, &ps);
 }
 
-unsafe fn panel_click(h: HWND, right: bool, l: LPARAM) {
+unsafe fn panel_click(h: HWND, l: LPARAM) {
     if MIRROR.with(|c| c.borrow().is_some()) {
         return; // the selection cannot change while mirroring
     }
@@ -839,27 +996,7 @@ unsafe fn panel_click(h: HWND, right: bool, l: LPARAM) {
         .iter()
         .position(|r| x >= r.left && x < r.right && y >= r.top && y < r.bottom)
     {
-        let cur_s = SendMessageW(ui.cb_src, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
-        let cur_d = SendMessageW(ui.cb_dst, M_CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 as i32;
-        let i = i as i32;
-        let (mut s, mut d) = (cur_s, cur_d);
-        if right {
-            d = i;
-            if s == i && cur_d >= 0 {
-                s = cur_d; // if they collide, swap them
-            }
-        } else {
-            s = i;
-            if d == i && cur_s >= 0 {
-                d = cur_s;
-            }
-        }
-        if s >= 0 {
-            SendMessageW(ui.cb_src, M_CB_SETCURSEL, WPARAM(s as usize), LPARAM(0));
-        }
-        if d >= 0 {
-            SendMessageW(ui.cb_dst, M_CB_SETCURSEL, WPARAM(d as usize), LPARAM(0));
-        }
+        SendMessageW(ui.cb_src, M_CB_SETCURSEL, WPARAM(i), LPARAM(0));
         let _ = InvalidateRect(h, None, FALSE);
     }
 }
@@ -872,11 +1009,7 @@ unsafe extern "system" fn panel_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> L
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            panel_click(h, false, l);
-            LRESULT(0)
-        }
-        WM_RBUTTONDOWN => {
-            panel_click(h, true, l);
+            panel_click(h, l);
             LRESULT(0)
         }
         _ => DefWindowProcW(h, m, w, l),
@@ -933,8 +1066,22 @@ fn main() -> Result<()> {
         };
         RegisterClassExW(&wc3);
 
+        // Class of the "Open monitor" dialog
+        let wc4 = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(dialog_proc),
+            hInstance: hinst,
+            hIcon: icon,
+            hIconSm: icon,
+            lpszClassName: w!("ScreenMirrorDlg"),
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hbrBackground: HBRUSH((COLOR_BTNFACE.0 + 1) as usize as *mut c_void),
+            ..Default::default()
+        };
+        RegisterClassExW(&wc4);
+
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut r = RECT { left: 0, top: 0, right: 360, bottom: 448 };
+        let mut r = RECT { left: 0, top: 0, right: 360, bottom: 392 };
         let _ = AdjustWindowRect(&mut r, style, FALSE);
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -953,8 +1100,16 @@ fn main() -> Result<()> {
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            // Let the dialog handle Tab, Enter and Esc like a real dialog.
+            let dlg = OPEN_DLG.with(|d| d.borrow().as_ref().map(|x| x.hwnd));
+            let handled = match dlg {
+                Some(h) => IsDialogMessageW(h, &msg).as_bool(),
+                None => false,
+            };
+            if !handled {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
         }
     }
     Ok(())
