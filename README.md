@@ -16,7 +16,9 @@ on the monitor of your choice (a TV, a second screen, a capture device, etc.).
 - Visual layout panel that draws your monitors in their real arrangement:
   left click to pick the source, right click to pick the destination
 - Optional VSync
-- The mirror window never takes focus, so it won't pull you out of a game
+- The mirror opens as a floating window on the destination monitor; press
+  **F11** to make it fullscreen and **Esc** to go back
+- Starting the mirror never takes focus, so it won't pull you out of a game
 - GPU-only pipeline (no CPU copies), no console window, a single small executable
 
 ## How it works
@@ -25,9 +27,10 @@ on the monitor of your choice (a TV, a second screen, a capture device, etc.).
    [Windows Graphics Capture](https://learn.microsoft.com/en-us/windows/uwp/audio-video-camera/screen-capture)
    API, which delivers frames as Direct3D 11 textures.
 2. Each frame is copied on the GPU into the back buffer of a flip-model DXGI
-   swap chain attached to a borderless window on the destination monitor.
+   swap chain attached to a window on the destination monitor.
 3. The swap chain uses `DXGI_SCALING_STRETCH`, so the desktop compositor scales
-   the image to the destination window.
+   the image to the destination window, both in the small floating window and in
+   fullscreen (F11).
 
 It talks to Windows through the [`windows`](https://crates.io/crates/windows)
 crate and uses plain Win32 controls for the interface, so there are no other
@@ -59,7 +62,9 @@ The optimized executable ends up in `target\release\screen-mirror.exe`.
    also use the two drop-down lists. Choosing a monitor that is already used for
    the other role swaps the two.
 3. Optionally tick **VSync** to avoid tearing at the cost of a little latency.
-4. Press **Start**. A borderless window appears on the destination monitor.
+4. Press **Start**. A floating window appears on the destination monitor showing
+   a live copy of the source. Press **F11** on it to go fullscreen and **Esc** to
+   return to the floating window.
 5. Press **Stop** to close the mirror. Use **Refresh monitors** if you connect a
    display or change a resolution while the program is open.
 
@@ -75,6 +80,9 @@ While the mirror is running, the selection is locked; stop it first to change it
   requests that automatically.
 - **Exclusive fullscreen:** games running in true exclusive fullscreen may show
   up black in the capture. Borderless or windowed fullscreen modes work.
+- **Keyboard:** **F11** and **Esc** act on the mirror window, so click it once if
+  it does not have focus. Start it with the mouse in the control window and the
+  mirror will not steal focus from your game.
 - **Performance:** capturing costs some GPU time. If you are sensitive to it,
   compare your frame rate with and without the program running.
 - **Latency:** VSync is off by default for the lowest latency; the copy is

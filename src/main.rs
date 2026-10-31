@@ -1,6 +1,6 @@
 //! screen-mirror (GUI): mirrors one monitor onto another with Windows Graphics Capture + D3D11.
-//! Control window with source/destination pickers. The mirror window never takes focus
-//! (so it will not pull you out of a game); stop it with the "Stop" button.
+//! Control window with source/destination pickers. The mirror opens as a floating window
+//! that can be made fullscreen with F11 (Esc leaves fullscreen); stop it with "Stop".
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -55,6 +55,10 @@ const M_BM_GETCHECK: u32 = 0x00F0;
 const M_WM_SETFONT: u32 = 0x0030;
 
 const WM_MIRROR_CLOSED: u32 = WM_APP + 1;
+
+// Virtual-key codes (Win32::UI::Input::KeyboardAndMouse is not a dependency)
+const VK_F11_KEY: u16 = 0x7A;
+const VK_ESCAPE_KEY: u16 = 0x1B;
 
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -195,21 +199,94 @@ struct Mirror {
     token: windows::Foundation::EventRegistrationToken,
     src_idx: usize,
     dst_idx: usize,
+    fullscreen: bool,
+    saved_style: isize,
+    saved_rect: RECT,
+}
+
+/// Floating window inside the destination monitor: 70% wide, 16:9, centered.
+fn float_rect(dst: &RECT) -> RECT {
+    let mw = (dst.right - dst.left).max(1);
+    let mh = (dst.bottom - dst.top).max(1);
+    let mut w = mw * 7 / 10;
+    let mut h = w * 9 / 16;
+    if h > mh * 8 / 10 {
+        h = mh * 8 / 10;
+        w = h * 16 / 9;
+    }
+    let x = dst.left + (mw - w) / 2;
+    let y = dst.top + (mh - h) / 2;
+    RECT { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// Toggles the mirror window between floating and borderless fullscreen (F11).
+unsafe fn toggle_fullscreen(h: HWND) {
+    let go_full = MIRROR.with(|c| {
+        let mut b = c.borrow_mut();
+        match b.as_mut() {
+            Some(m) => {
+                let was_full = m.fullscreen;
+                if !was_full {
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(h, &mut r);
+                    m.saved_rect = r;
+                    m.saved_style = GetWindowLongPtrW(h, GWL_STYLE);
+                }
+                m.fullscreen = !was_full;
+                m.fullscreen
+            }
+            None => false,
+        }
+    });
+
+    if go_full {
+        let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+        let mut mi: MONITORINFO = std::mem::zeroed();
+        mi.cbSize = size_of::<MONITORINFO>() as u32;
+        let _ = GetMonitorInfoW(mon, &mut mi);
+        let r = mi.rcMonitor;
+        SetWindowLongPtrW(h, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as isize);
+        let _ = SetWindowPos(
+            h,
+            None,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    } else {
+        let (style, r) = MIRROR.with(|c| {
+            let b = c.borrow();
+            let m = b.as_ref().unwrap();
+            (m.saved_style, m.saved_rect)
+        });
+        SetWindowLongPtrW(h, GWL_STYLE, style);
+        let _ = SetWindowPos(
+            h,
+            None,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
 }
 
 impl Mirror {
     fn start(src: &Mon, dst: &Mon, vsync: bool) -> Result<Mirror> {
         let sync: u32 = if vsync { 1 } else { 0 };
 
-        // Borderless window on the destination monitor that does not take focus.
+        // Floating window inside the destination monitor; F11 toggles fullscreen.
         let hwnd = unsafe {
             let hinst: HINSTANCE = GetModuleHandleW(None)?.into();
-            let r = dst.rect;
+            let r = float_rect(&dst.rect);
             let hwnd = CreateWindowExW(
-                WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                WS_EX_TOOLWINDOW,
                 w!("ScreenMirrorWnd"),
-                w!("screen-mirror"),
-                WS_POPUP,
+                w!("Screen Mirror"),
+                WS_OVERLAPPEDWINDOW,
                 r.left,
                 r.top,
                 r.right - r.left,
@@ -228,7 +305,17 @@ impl Mirror {
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 }
-                Ok(Mirror { hwnd, pool, session, token, src_idx: 0, dst_idx: 0 })
+                Ok(Mirror {
+                    hwnd,
+                    pool,
+                    session,
+                    token,
+                    src_idx: 0,
+                    dst_idx: 0,
+                    fullscreen: false,
+                    saved_style: 0,
+                    saved_rect: RECT::default(),
+                })
             }
             Err(e) => {
                 unsafe {
@@ -530,7 +617,7 @@ unsafe fn toggle() {
             set_text(
                 ui.status,
                 &format!(
-                    "Mirroring {} on {}.",
+                    "Mirroring {} on {}.\r\nPress F11 in the mirror window for fullscreen.",
                     mons[s as usize].name, mons[d as usize].name
                 ),
             );
@@ -589,11 +676,32 @@ unsafe extern "system" fn mirror_proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> 
             let _ = PostMessageW(main, WM_MIRROR_CLOSED, WPARAM(0), LPARAM(h.0 as isize));
             LRESULT(0)
         }
-        WM_SETCURSOR => {
-            SetCursor(None);
-            LRESULT(1)
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let vk = w.0 as u16;
+            if vk == VK_F11_KEY {
+                toggle_fullscreen(h);
+                LRESULT(0)
+            } else if vk == VK_ESCAPE_KEY {
+                let full = MIRROR.with(|c| c.borrow().as_ref().map(|m| m.fullscreen).unwrap_or(false));
+                if full {
+                    toggle_fullscreen(h);
+                }
+                LRESULT(0)
+            } else {
+                DefWindowProcW(h, m, w, l)
+            }
         }
-        WM_MOUSEACTIVATE => LRESULT(3), // MA_NOACTIVATE
+        // The cursor is only hidden in fullscreen; in floating mode it is needed
+        // to move and resize the window.
+        WM_SETCURSOR => {
+            let full = MIRROR.with(|c| c.borrow().as_ref().map(|m| m.fullscreen).unwrap_or(false));
+            if full {
+                SetCursor(None);
+                LRESULT(1)
+            } else {
+                DefWindowProcW(h, m, w, l)
+            }
+        }
         _ => DefWindowProcW(h, m, w, l),
     }
 }
@@ -807,6 +915,7 @@ fn main() -> Result<()> {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(mirror_proc),
             hInstance: hinst,
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
             lpszClassName: w!("ScreenMirrorWnd"),
             hbrBackground: HBRUSH(black.0),
             ..Default::default()
