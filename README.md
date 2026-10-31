@@ -93,3 +93,7 @@ src/main.rs    Capture engine, window procedures and GUI
 ## Contributing
 
 Issues and pull requests are welcome.
+
+## License
+
+Released under the [MIT License](LICENSE).
